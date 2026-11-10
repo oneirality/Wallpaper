@@ -1,5 +1,5 @@
 Doesn't need any setup or admin rights.
-
+Download ALL files into one folder.
 # Wallpaper
 
 Set any image (or animated GIF) as your desktop wallpaper from a PowerShell
