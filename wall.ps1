@@ -7,11 +7,11 @@
 # SPI_SETDESKWALLPAPER. No window z-order games -> immune to that regression.
 #
 # - Static image: drawn once, then the process stays resident but idle
-#   (only so Shift+3 / stop.ps1 can restore the original wallpaper).
+#   (only so stop.ps1 can restore the original wallpaper).
 # - Animated GIF: frames pushed continuously; each frame is a wallpaper swap,
 #   so keep delays >= ~100 ms/frame.
 #
-# Stop: Shift+3 (global hotkey) or stop_wallpaper.bat.
+# Stop: stop_wallpaper.bat (or kill the process).
 # On stop the original wallpaper is restored.
 
 param(
@@ -31,20 +31,17 @@ public static class Native {
     public static extern bool SpiSet(uint action, uint uiParam, string pvParam, uint fWinIni);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SystemParametersInfoW")]
     public static extern bool SpiGet(uint action, uint uiParam, System.Text.StringBuilder pvParam, uint fWinIni);
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")]
-    public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
-    [DllImport("user32.dll")]
-    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
-}
-
-// exits the message loop when the Shift+3 hotkey (WM_HOTKEY = 0x0312) arrives
-public class HotkeyFilter : System.Windows.Forms.IMessageFilter {
-    public bool PreFilterMessage(ref System.Windows.Forms.Message m) {
-        if (m.Msg == 0x0312) { System.Windows.Forms.Application.Exit(); return true; }
-        return false;
-    }
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }
 "@
+
+# Hide the console window (covers direct powershell.exe launches; the .bat
+# launcher already avoids creating one). SW_HIDE = 0.
+$hwndConsole = [Native]::GetConsoleWindow()
+if ($hwndConsole -ne [IntPtr]::Zero) { [void][Native]::ShowWindow($hwndConsole, 0) }
 
 # --- Re-run guard -----------------------------------------------------------
 $createdNew = $false
@@ -139,48 +136,24 @@ if (-not $isAnimated) {
     }
 }
 
-# --- Hotkey (Shift+3) + stop-event polling -----------------------------------
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "MyWallPS"
-$form.ShowInTaskbar = $false
-$form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
-$form.Opacity = 0
-$form.ShowInTaskbar = $false
-$form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
-$form.Size = New-Object System.Drawing.Size(1, 1)
-$form.Show()
-[void]$form.Handle
-if (-not [Native]::RegisterHotKey($form.Handle, 1, 4, 0x33)) {
-    Write-Warning "Shift+3 is taken by another app - use stop_wallpaper.bat instead."
-}
-[System.Windows.Forms.Application]::AddMessageFilter((New-Object HotkeyFilter))
-
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 250
-$frame = 0
-$timer.Add_Tick({
-    if ($stopEvent.WaitOne(0)) { $form.Close(); return }
-    if ($isAnimated) {
-        $img.SelectActiveFrame($fd, $frame)
-        $gfx.Clear([System.Drawing.Color]::Black)
-        $gfx.DrawImage($img, [float]$dx, [float]$dy, [float]$dw, [float]$dh)
-        Push-Frame
-        $frame = ($frame + 1) % $frameCount
-    }
-})
-$timer.Start()
-
+# --- Main loop ---------------------------------------------------------------
+# No window at all -> nothing shows in Alt+Tab or the taskbar. Stop via
+# stop_wallpaper.bat (sets the stop event) or by killing the process.
 try {
     if ($isAnimated) {
-        # timer drives GIF playback; messages pump the hotkey
-        [System.Windows.Forms.Application]::Run($form)
+        $frame = 0
+        while (-not $stopEvent.WaitOne([TimeSpan]::FromMilliseconds($delays[$frame]))) {
+            $img.SelectActiveFrame($fd, $frame)
+            $gfx.Clear([System.Drawing.Color]::Black)
+            $gfx.DrawImage($img, [float]$dx, [float]$dy, [float]$dw, [float]$dh)
+            Push-Frame
+            $frame = ($frame + 1) % $frameCount
+        }
     } else {
-        # static: just wait for stop/hotkey
-        [System.Windows.Forms.Application]::Run($form)
+        # static: just wait for the stop signal
+        [void]$stopEvent.WaitOne()
     }
 } finally {
-    $timer.Stop(); $timer.Dispose()
-    try { [Native]::UnregisterHotKey($form.Handle, 1) } catch {}
     Restore-Wallpaper
     if (Test-Path $scratch) { Remove-Item $scratch -ErrorAction SilentlyContinue }
     $img.Dispose(); $gfx.Dispose(); $canvas.Dispose()
